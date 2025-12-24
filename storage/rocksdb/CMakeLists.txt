@@ -70,43 +70,34 @@ IF(MSVC_ARM64)
  SKIP_ROCKSDB_PLUGIN("Windows ARM64 not supported")
 ENDIF()
 
-# This plugin needs recent C++ compilers (it is using C++11 features)
+# This plugin needs recent C++ compilers (it is using C++17 features)
 # Skip build for the old compilers
-SET(CXX11_FLAGS)
-SET(OLD_COMPILER_MSG "requires c++11 -capable compiler (minimal supported versions are g++ 4.8, clang 3.3, VS2015)")
+SET(OLD_COMPILER_MSG "requires c++17 -capable compiler")
 
 IF(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
   EXECUTE_PROCESS(COMMAND ${CMAKE_CXX_COMPILER} -dumpversion OUTPUT_VARIABLE GCC_VERSION)
-  IF (GCC_VERSION VERSION_LESS 4.8)
+  IF (GCC_VERSION VERSION_LESS 7.0)
     SKIP_ROCKSDB_PLUGIN("${OLD_COMPILER_MSG}")
-  ENDIF()
-  SET(CXX11_FLAGS "-std=c++11")
-  IF (GCC_VERSION VERSION_LESS 5.0)
-    SET(CXX11_FLAGS "-std=c++11 -Wno-missing-field-initializers")
   ENDIF()
 ELSEIF (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  IF ((CMAKE_CXX_COMPILER_VERSION AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS  3.3) OR
-     (CLANG_VERSION_STRING AND CLANG_VERSION_STRING VERSION_LESS  3.3))
+  IF ((CMAKE_CXX_COMPILER_VERSION AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS  5.0) OR
+     (CLANG_VERSION_STRING AND CLANG_VERSION_STRING VERSION_LESS  5.0))
     SKIP_ROCKSDB_PLUGIN("${OLD_COMPILER_MSG}")
   ENDIF()
-  SET(CXX11_FLAGS "-std=c++11 -stdlib=libstdc++")
   IF(MSVC)
     # clang-cl does not work yet
     SKIP_ROCKSDB_PLUGIN("Clang-cl is not supported")
   ENDIF()
 ELSEIF(MSVC)
-  IF (MSVC_VERSION LESS 1900)
+  IF (MSVC_VERSION LESS 1910)
     SKIP_ROCKSDB_PLUGIN("${OLD_COMPILER_MSG}")
   ENDIF()
 ELSE()
   SKIP_ROCKSDB_PLUGIN("Compiler not supported")
 ENDIF()
 
-IF(CMAKE_VERSION GREATER 3.0)
-  SET(CMAKE_CXX_STANDARD  11)
-ELSEIF(CXX11_FLAGS)
-  ADD_DEFINITIONS(${CXX11_FLAGS})
-ENDIF()
+SET(CMAKE_CXX_STANDARD 17)
+SET(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 SET(ROCKSDB_SE_SOURCES
   rdb_mariadb_server_port.cc
@@ -230,6 +221,10 @@ TARGET_LINK_LIBRARIES(rocksdb_aux_lib ${ATOMIC_EXTRA_LIBS})
 
 
 TARGET_LINK_LIBRARIES(rocksdb rocksdb_aux_lib)
+set_property(TARGET rocksdblib PROPERTY CXX_STANDARD 17)
+set_property(TARGET rocksdblib PROPERTY CXX_STANDARD_REQUIRED ON)
+set_property(TARGET rocksdb_aux_lib PROPERTY CXX_STANDARD 17)
+set_property(TARGET rocksdb_aux_lib PROPERTY CXX_STANDARD_REQUIRED ON)
 
 CHECK_FUNCTION_EXISTS(sched_getcpu  HAVE_SCHED_GETCPU)
 IF(HAVE_SCHED_GETCPU)
@@ -305,3 +300,11 @@ IF(ROCKSDB_GIT_HASH OR
   CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/rdb_source_revision.h.in
                ${CMAKE_CURRENT_BINARY_DIR}/rdb_source_revision.h )
 ENDIF()
+
+set_property(TARGET rocksdblib PROPERTY CXX_STANDARD 17)
+set_property(TARGET rocksdblib PROPERTY CXX_STANDARD_REQUIRED ON)
+set_property(TARGET rocksdblib PROPERTY CXX_EXTENSIONS OFF)
+
+set_property(TARGET rocksdb_tools PROPERTY CXX_STANDARD 17)
+set_property(TARGET rocksdb_tools PROPERTY CXX_STANDARD_REQUIRED ON)
+set_property(TARGET rocksdb_tools PROPERTY CXX_EXTENSIONS OFF)

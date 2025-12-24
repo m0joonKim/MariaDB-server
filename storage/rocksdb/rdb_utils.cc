@@ -40,6 +40,7 @@
 #endif
 
 /* RocksDB header files */
+#include "rocksdb/version.h"
 #include "util/compression.h"
 
 namespace myrocks {
@@ -312,8 +313,10 @@ const char *get_rocksdb_supported_compression_types()
       rocksdb::kBZip2Compression,
       rocksdb::kLZ4Compression,
       rocksdb::kLZ4HCCompression,
-      rocksdb::kXpressCompression,
-      rocksdb::kZSTDNotFinalCompression
+      rocksdb::kXpressCompression
+#if defined(ROCKSDB_MAJOR) && ROCKSDB_MAJOR < 10
+      , rocksdb::kZSTDNotFinalCompression
+#endif
     };
 
     for (auto typ : known_types)

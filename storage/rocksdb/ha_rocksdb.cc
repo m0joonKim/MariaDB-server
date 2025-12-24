@@ -57,6 +57,7 @@
 #include "rocksdb/memory_allocator.h"
 #include "rocksdb/persistent_cache.h"
 #include "rocksdb/rate_limiter.h"
+#include "rocksdb/version.h"
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/thread_status.h"
 #include "rocksdb/utilities/checkpoint.h"
@@ -609,7 +610,6 @@ static uint32_t rocksdb_force_compute_memtable_stats_cachetime;
 static my_bool rocksdb_debug_optimizer_no_zero_cardinality;
 static uint32_t rocksdb_wal_recovery_mode;
 static uint32_t rocksdb_stats_level;
-static uint32_t rocksdb_access_hint_on_compaction_start;
 static char *rocksdb_compact_cf_name;
 static char *rocksdb_delete_cf_name;
 static char *rocksdb_checkpoint_name;
@@ -1253,22 +1253,6 @@ static MYSQL_SYSVAR_SIZE_T(compaction_readahead_size,
                           /* min */ 0L, /* max */ SIZE_T_MAX, 0);
 
 static MYSQL_SYSVAR_BOOL(
-    new_table_reader_for_compaction_inputs,
-    *reinterpret_cast<my_bool *>(
-        &rocksdb_db_options->new_table_reader_for_compaction_inputs),
-    PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
-    "DBOptions::new_table_reader_for_compaction_inputs for RocksDB", nullptr,
-    nullptr, rocksdb_db_options->new_table_reader_for_compaction_inputs);
-
-static MYSQL_SYSVAR_UINT(
-    access_hint_on_compaction_start, rocksdb_access_hint_on_compaction_start,
-    PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
-    "DBOptions::access_hint_on_compaction_start for RocksDB", nullptr, nullptr,
-    /* default */ (uint)rocksdb::Options::AccessHint::NORMAL,
-    /* min */ (uint)rocksdb::Options::AccessHint::NONE,
-    /* max */ (uint)rocksdb::Options::AccessHint::WILLNEED, 0);
-
-static MYSQL_SYSVAR_BOOL(
     allow_concurrent_memtable_write,
     *reinterpret_cast<my_bool *>(
         &rocksdb_db_options->allow_concurrent_memtable_write),
@@ -1571,14 +1555,6 @@ static MYSQL_SYSVAR_ENUM(index_type, rocksdb_index_type,
                          nullptr, nullptr,
                          (ulong)rocksdb_tbl_options->index_type,
                          &index_type_typelib);
-
-static MYSQL_SYSVAR_BOOL(
-    hash_index_allow_collision,
-    *reinterpret_cast<my_bool *>(
-        &rocksdb_tbl_options->hash_index_allow_collision),
-    PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
-    "BlockBasedTableOptions::hash_index_allow_collision for RocksDB", nullptr,
-    nullptr, rocksdb_tbl_options->hash_index_allow_collision);
 
 static MYSQL_SYSVAR_BOOL(
     no_block_cache,
@@ -2054,8 +2030,6 @@ static struct st_mysql_sys_var *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(perf_context_level),
     MYSQL_SYSVAR(wal_recovery_mode),
     MYSQL_SYSVAR(stats_level),
-    MYSQL_SYSVAR(access_hint_on_compaction_start),
-    MYSQL_SYSVAR(new_table_reader_for_compaction_inputs),
     MYSQL_SYSVAR(compaction_readahead_size),
     MYSQL_SYSVAR(allow_concurrent_memtable_write),
     MYSQL_SYSVAR(enable_write_thread_adaptive_yield),
@@ -2069,7 +2043,6 @@ static struct st_mysql_sys_var *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(cache_index_and_filter_with_high_priority),
     MYSQL_SYSVAR(pin_l0_filter_and_index_blocks_in_cache),
     MYSQL_SYSVAR(index_type),
-    MYSQL_SYSVAR(hash_index_allow_collision),
     MYSQL_SYSVAR(no_block_cache),
     MYSQL_SYSVAR(block_size),
     MYSQL_SYSVAR(block_size_deviation),
@@ -4713,7 +4686,6 @@ static bool rocksdb_show_status(handlerton *const hton, THD *const thd,
             } else {
               internal_cache_count++;
             }
-            cache_set.insert(bbt_opt->block_cache_compressed.get());
           }
         }
       }
@@ -5141,11 +5113,15 @@ static rocksdb::Status check_rocksdb_options_compatibility(
     const std::vector<rocksdb::ColumnFamilyDescriptor> &cf_descr) {
   DBUG_ASSERT(rocksdb_datadir != nullptr);
 
+  rocksdb::ConfigOptions config_options;
+  config_options.env = rocksdb::Env::Default();
+  config_options.ignore_unknown_options = rocksdb_ignore_unknown_options;
+
   rocksdb::DBOptions loaded_db_opt;
   std::vector<rocksdb::ColumnFamilyDescriptor> loaded_cf_descs;
   rocksdb::Status status =
-      LoadLatestOptions(dbpath, rocksdb::Env::Default(), &loaded_db_opt,
-                        &loaded_cf_descs, rocksdb_ignore_unknown_options);
+      LoadLatestOptions(config_options, dbpath, &loaded_db_opt,
+                        &loaded_cf_descs);
 
   // If we're starting from scratch and there are no options saved yet then this
   // is a valid case. Therefore we can't compare the current set of options to
@@ -5184,9 +5160,8 @@ static rocksdb::Status check_rocksdb_options_compatibility(
 
   // This is the essence of the function - determine if it's safe to open the
   // database or not.
-  status = CheckOptionsCompatibility(dbpath, rocksdb::Env::Default(), main_opts,
-                                     loaded_cf_descs,
-                                     rocksdb_ignore_unknown_options);
+  status = CheckOptionsCompatibility(config_options, dbpath, main_opts,
+                                     loaded_cf_descs);
 
   return status;
 }
@@ -5392,10 +5367,6 @@ static int rocksdb_init_func(void *const p) {
 
   rocksdb_db_options->wal_recovery_mode =
       static_cast<rocksdb::WALRecoveryMode>(rocksdb_wal_recovery_mode);
-
-  rocksdb_db_options->access_hint_on_compaction_start =
-      static_cast<rocksdb::Options::AccessHint>(
-          rocksdb_access_hint_on_compaction_start);
 
   if (rocksdb_db_options->allow_mmap_reads &&
       rocksdb_db_options->use_direct_reads) {
@@ -10995,7 +10966,8 @@ int ha_rocksdb::info(uint flag) {
       uchar buf[Rdb_key_def::INDEX_NUMBER_SIZE * 2];
       auto r = get_range(pk_index(table, m_tbl_def), buf);
       uint64_t sz = 0;
-      uint8_t include_flags = rocksdb::DB::INCLUDE_FILES;
+      auto include_flags =
+          rocksdb::DB::SizeApproximationFlags::INCLUDE_FILES;
       // recompute SST files stats only if records count is 0
       if (stats.records == 0) {
         rdb->GetApproximateSizes(m_pk_descr->get_cf(), &r, 1, &sz,
@@ -12045,7 +12017,7 @@ ha_rows ha_rocksdb::records_in_range(uint inx, const key_range *const min_key,
   }
 
   // Getting statistics, including from Memtables
-  uint8_t include_flags = rocksdb::DB::INCLUDE_FILES;
+  auto include_flags = rocksdb::DB::SizeApproximationFlags::INCLUDE_FILES;
   rdb->GetApproximateSizes(kd.get_cf(), &r, 1, &sz, include_flags);
   ret = rows * sz / disk_size;
   uint64_t memTableCount;
@@ -13147,11 +13119,27 @@ bool ha_rocksdb::commit_inplace_alter_table(
                               struct system_status_var *status_var,        \
                               enum enum_var_type var_type) {               \
     rocksdb_status_counters.name =                                         \
-        rocksdb_stats->getTickerCount(rocksdb::key);                       \
+    rocksdb_stats->getTickerCount(rocksdb::key);                       \
     var->type = SHOW_LONGLONG;                                             \
     var->value = reinterpret_cast<char *>(&rocksdb_status_counters.name);  \
     return HA_EXIT_SUCCESS;                                                \
   }
+
+#define DEF_SHOW_FUNC_ZERO(name)                                         \
+  static int SHOW_FNAME(name)(MYSQL_THD thd, SHOW_VAR * var, void *buff, \
+                              struct system_status_var *status_var,      \
+                              enum enum_var_type var_type) {             \
+    rocksdb_status_counters.name = 0;                                    \
+    var->type = SHOW_LONGLONG;                                           \
+    var->value = reinterpret_cast<char *>(&rocksdb_status_counters.name);\
+    return HA_EXIT_SUCCESS;                                              \
+  }
+
+#if defined(ROCKSDB_MAJOR) && ROCKSDB_MAJOR >= 10
+#define DEF_SHOW_FUNC_OR_ZERO(name, ticker) DEF_SHOW_FUNC_ZERO(name)
+#else
+#define DEF_SHOW_FUNC_OR_ZERO(name, ticker) DEF_SHOW_FUNC(name, ticker)
+#endif
 
 #define DEF_STATUS_VAR(name) \
   SHOW_FUNC_ENTRY( "rocksdb_" #name, &SHOW_FNAME(name))
@@ -13247,12 +13235,14 @@ DEF_SHOW_FUNC(block_cache_index_miss, BLOCK_CACHE_INDEX_MISS)
 DEF_SHOW_FUNC(block_cache_index_hit, BLOCK_CACHE_INDEX_HIT)
 DEF_SHOW_FUNC(block_cache_index_add, BLOCK_CACHE_INDEX_ADD)
 DEF_SHOW_FUNC(block_cache_index_bytes_insert, BLOCK_CACHE_INDEX_BYTES_INSERT)
-DEF_SHOW_FUNC(block_cache_index_bytes_evict, BLOCK_CACHE_INDEX_BYTES_EVICT)
+DEF_SHOW_FUNC_OR_ZERO(block_cache_index_bytes_evict,
+                      BLOCK_CACHE_INDEX_BYTES_EVICT)
 DEF_SHOW_FUNC(block_cache_filter_miss, BLOCK_CACHE_FILTER_MISS)
 DEF_SHOW_FUNC(block_cache_filter_hit, BLOCK_CACHE_FILTER_HIT)
 DEF_SHOW_FUNC(block_cache_filter_add, BLOCK_CACHE_FILTER_ADD)
 DEF_SHOW_FUNC(block_cache_filter_bytes_insert, BLOCK_CACHE_FILTER_BYTES_INSERT)
-DEF_SHOW_FUNC(block_cache_filter_bytes_evict, BLOCK_CACHE_FILTER_BYTES_EVICT)
+DEF_SHOW_FUNC_OR_ZERO(block_cache_filter_bytes_evict,
+                      BLOCK_CACHE_FILTER_BYTES_EVICT)
 DEF_SHOW_FUNC(block_cache_bytes_read, BLOCK_CACHE_BYTES_READ)
 DEF_SHOW_FUNC(block_cache_bytes_write, BLOCK_CACHE_BYTES_WRITE)
 DEF_SHOW_FUNC(block_cache_data_bytes_insert, BLOCK_CACHE_DATA_BYTES_INSERT)
@@ -13282,27 +13272,31 @@ DEF_SHOW_FUNC(number_db_next_found, NUMBER_DB_NEXT_FOUND)
 DEF_SHOW_FUNC(number_db_prev, NUMBER_DB_PREV)
 DEF_SHOW_FUNC(number_db_prev_found, NUMBER_DB_PREV_FOUND)
 DEF_SHOW_FUNC(iter_bytes_read, ITER_BYTES_READ)
-DEF_SHOW_FUNC(no_file_closes, NO_FILE_CLOSES)
+DEF_SHOW_FUNC_OR_ZERO(no_file_closes, NO_FILE_CLOSES)
 DEF_SHOW_FUNC(no_file_opens, NO_FILE_OPENS)
 DEF_SHOW_FUNC(no_file_errors, NO_FILE_ERRORS)
 DEF_SHOW_FUNC(stall_micros, STALL_MICROS)
+#if defined(ROCKSDB_MAJOR) && ROCKSDB_MAJOR >= 10
+DEF_SHOW_FUNC(num_iterators, NO_ITERATOR_CREATED)
+#else
 DEF_SHOW_FUNC(num_iterators, NO_ITERATORS)
+#endif
 DEF_SHOW_FUNC(number_multiget_get, NUMBER_MULTIGET_CALLS)
 DEF_SHOW_FUNC(number_multiget_keys_read, NUMBER_MULTIGET_KEYS_READ)
 DEF_SHOW_FUNC(number_multiget_bytes_read, NUMBER_MULTIGET_BYTES_READ)
-DEF_SHOW_FUNC(number_deletes_filtered, NUMBER_FILTERED_DELETES)
+DEF_SHOW_FUNC_OR_ZERO(number_deletes_filtered, NUMBER_FILTERED_DELETES)
 DEF_SHOW_FUNC(number_merge_failures, NUMBER_MERGE_FAILURES)
 DEF_SHOW_FUNC(bloom_filter_prefix_checked, BLOOM_FILTER_PREFIX_CHECKED)
 DEF_SHOW_FUNC(bloom_filter_prefix_useful, BLOOM_FILTER_PREFIX_USEFUL)
 DEF_SHOW_FUNC(number_reseeks_iteration, NUMBER_OF_RESEEKS_IN_ITERATION)
 DEF_SHOW_FUNC(getupdatessince_calls, GET_UPDATES_SINCE_CALLS)
-DEF_SHOW_FUNC(block_cachecompressed_miss, BLOCK_CACHE_COMPRESSED_MISS)
-DEF_SHOW_FUNC(block_cachecompressed_hit, BLOCK_CACHE_COMPRESSED_HIT)
+DEF_SHOW_FUNC_OR_ZERO(block_cachecompressed_miss, BLOCK_CACHE_COMPRESSED_MISS)
+DEF_SHOW_FUNC_OR_ZERO(block_cachecompressed_hit, BLOCK_CACHE_COMPRESSED_HIT)
 DEF_SHOW_FUNC(wal_synced, WAL_FILE_SYNCED)
 DEF_SHOW_FUNC(wal_bytes, WAL_FILE_BYTES)
 DEF_SHOW_FUNC(write_self, WRITE_DONE_BY_SELF)
 DEF_SHOW_FUNC(write_other, WRITE_DONE_BY_OTHER)
-DEF_SHOW_FUNC(write_timedout, WRITE_TIMEDOUT)
+DEF_SHOW_FUNC_OR_ZERO(write_timedout, WRITE_TIMEDOUT)
 DEF_SHOW_FUNC(write_wal, WRITE_WITH_WAL)
 DEF_SHOW_FUNC(flush_write_bytes, FLUSH_WRITE_BYTES)
 DEF_SHOW_FUNC(compact_read_bytes, COMPACT_READ_BYTES)
@@ -13310,7 +13304,7 @@ DEF_SHOW_FUNC(compact_write_bytes, COMPACT_WRITE_BYTES)
 DEF_SHOW_FUNC(number_superversion_acquires, NUMBER_SUPERVERSION_ACQUIRES)
 DEF_SHOW_FUNC(number_superversion_releases, NUMBER_SUPERVERSION_RELEASES)
 DEF_SHOW_FUNC(number_superversion_cleanups, NUMBER_SUPERVERSION_CLEANUPS)
-DEF_SHOW_FUNC(number_block_not_compressed, NUMBER_BLOCK_NOT_COMPRESSED)
+DEF_SHOW_FUNC_OR_ZERO(number_block_not_compressed, NUMBER_BLOCK_NOT_COMPRESSED)
 
 static void myrocks_update_status() {
   export_stats.rows_deleted = global_stats.rows[ROWS_DELETED];

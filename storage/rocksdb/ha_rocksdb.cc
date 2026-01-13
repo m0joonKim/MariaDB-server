@@ -86,6 +86,7 @@
 #include "./rdb_psi.h"
 #include "./rdb_threads.h"
 #include "./rdb_mariadb_server_port.h"
+#include "db/compaction/compaction_job.h"
 
 /**
   Mark transaction to rollback and mark error as fatal to a sub-statement.
@@ -610,6 +611,14 @@ static uint32_t rocksdb_force_compute_memtable_stats_cachetime;
 static my_bool rocksdb_debug_optimizer_no_zero_cardinality;
 static uint32_t rocksdb_wal_recovery_mode;
 static uint32_t rocksdb_stats_level;
+static my_bool rocksdb_enable_iobpf = false;
+static char *rocksdb_iobpf_path = const_cast<char *>("iobpf/comp.bpf.o");
+static char *rocksdb_iobpf_secondary_path =
+    const_cast<char *>("iobpf/comp_secondary.bpf.o");
+static ulong rocksdb_iobpf_hybrid_bound = 0;
+static ulong rocksdb_iobpf_res_buf_size = 1048576;
+static ulong rocksdb_iobpf_readahead_size = 2097152;
+static my_bool rocksdb_iobpf_use_early_cache_drop = false;
 static char *rocksdb_compact_cf_name;
 static char *rocksdb_delete_cf_name;
 static char *rocksdb_checkpoint_name;
@@ -1251,6 +1260,39 @@ static MYSQL_SYSVAR_SIZE_T(compaction_readahead_size,
                           nullptr, nullptr,
                           rocksdb_db_options->compaction_readahead_size,
                           /* min */ 0L, /* max */ SIZE_T_MAX, 0);
+
+static MYSQL_SYSVAR_BOOL(
+    enable_iobpf, rocksdb_enable_iobpf, PLUGIN_VAR_RQCMDARG,
+    "Enable IO BPF support in RocksDB compaction", nullptr, nullptr, FALSE);
+
+static MYSQL_SYSVAR_STR(
+    iobpf_path, rocksdb_iobpf_path, PLUGIN_VAR_RQCMDARG,
+    "Primary IO BPF object path", nullptr, nullptr, "iobpf/comp.bpf.o");
+
+static MYSQL_SYSVAR_STR(
+    iobpf_secondary_path, rocksdb_iobpf_secondary_path, PLUGIN_VAR_RQCMDARG,
+    "Secondary IO BPF object path", nullptr, nullptr,
+    "iobpf/comp_secondary.bpf.o");
+
+static MYSQL_SYSVAR_ULONG(
+    iobpf_hybrid_bound, rocksdb_iobpf_hybrid_bound, PLUGIN_VAR_RQCMDARG,
+    "Hybrid bound (file # or output level) for IO BPF execution", nullptr,
+    nullptr, 0, 0, ULONG_MAX, 0);
+
+static MYSQL_SYSVAR_ULONG(
+    iobpf_res_buf_size, rocksdb_iobpf_res_buf_size, PLUGIN_VAR_RQCMDARG,
+    "IO BPF result buffer size", nullptr, nullptr, 1048576, 0, ULONG_MAX, 0);
+
+static MYSQL_SYSVAR_ULONG(
+    iobpf_readahead_size, rocksdb_iobpf_readahead_size, PLUGIN_VAR_RQCMDARG,
+    "IO BPF readahead size (even number)", nullptr, nullptr, 2097152, 0,
+    ULONG_MAX, 0);
+
+static MYSQL_SYSVAR_BOOL(iobpf_use_early_cache_drop,
+                         rocksdb_iobpf_use_early_cache_drop,
+                         PLUGIN_VAR_RQCMDARG,
+                         "Use early cache drop when IO BPF is enabled", nullptr,
+                         nullptr, FALSE);
 
 static MYSQL_SYSVAR_BOOL(
     allow_concurrent_memtable_write,
@@ -2027,6 +2069,13 @@ static struct st_mysql_sys_var *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(bytes_per_sync),
     MYSQL_SYSVAR(wal_bytes_per_sync),
     MYSQL_SYSVAR(enable_thread_tracking),
+    MYSQL_SYSVAR(enable_iobpf),
+    MYSQL_SYSVAR(iobpf_path),
+    MYSQL_SYSVAR(iobpf_secondary_path),
+    MYSQL_SYSVAR(iobpf_hybrid_bound),
+    MYSQL_SYSVAR(iobpf_res_buf_size),
+    MYSQL_SYSVAR(iobpf_readahead_size),
+    MYSQL_SYSVAR(iobpf_use_early_cache_drop),
     MYSQL_SYSVAR(perf_context_level),
     MYSQL_SYSVAR(wal_recovery_mode),
     MYSQL_SYSVAR(stats_level),
@@ -5368,6 +5417,17 @@ static int rocksdb_init_func(void *const p) {
   rocksdb_db_options->wal_recovery_mode =
       static_cast<rocksdb::WALRecoveryMode>(rocksdb_wal_recovery_mode);
 
+  if (rocksdb_enable_iobpf) {
+    ROCKSDB_NAMESPACE::preload_iobpf_bpf_prog(
+        static_cast<int>(rocksdb_db_options->max_background_jobs),
+        static_cast<int>(rocksdb_iobpf_hybrid_bound),
+        static_cast<int>(rocksdb_iobpf_res_buf_size),
+        static_cast<uint>(rocksdb_iobpf_readahead_size),
+        rocksdb_iobpf_use_early_cache_drop,
+        rocksdb_iobpf_path ? rocksdb_iobpf_path : "",
+        rocksdb_iobpf_secondary_path ? rocksdb_iobpf_secondary_path : "");
+  }
+
   if (rocksdb_db_options->allow_mmap_reads &&
       rocksdb_db_options->use_direct_reads) {
     // allow_mmap_reads implies !use_direct_reads and RocksDB will not open if
@@ -5573,6 +5633,8 @@ static int rocksdb_init_func(void *const p) {
   for (size_t i = 0; i < cf_names.size(); ++i) {
     rocksdb::ColumnFamilyOptions opts;
     cf_options_map->get_cf_options(cf_names[i], &opts);
+    opts.enable_iobpf = rocksdb_enable_iobpf;
+    opts.iobpf_path = rocksdb_iobpf_path ? rocksdb_iobpf_path : "";
 
     // NO_LINT_DEBUG
     sql_print_information("  cf=%s", cf_names[i].c_str());
@@ -9988,6 +10050,27 @@ int ha_rocksdb::check_duplicate_sk(const TABLE *table_arg,
   return 0;
 }
 
+namespace {
+
+constexpr size_t kFixedSecondaryValueSize = 1024;
+
+// Pad secondary index values to the fixed size while preserving contents.
+rocksdb::Slice pad_secondary_value(const Rdb_key_def &kd,
+                                   const rocksdb::Slice &value) {
+  if (kd.m_index_type != Rdb_key_def::INDEX_TYPE_SECONDARY ||
+      value.size() >= kFixedSecondaryValueSize) {
+    return value;
+  }
+  // thread_local to ensure the backing store outlives the caller and avoids
+  // use-after-free when downstream code retains the Slice beyond the call.
+  thread_local std::string scratch;
+  scratch.assign(value.data(), value.size());
+  scratch.resize(kFixedSecondaryValueSize, '\0');
+  return rocksdb::Slice(scratch.data(), scratch.size());
+}
+
+}  // namespace
+
 int ha_rocksdb::bulk_load_key(Rdb_transaction *const tx, const Rdb_key_def &kd,
                               const rocksdb::Slice &key,
                               const rocksdb::Slice &value, bool sort) {
@@ -10014,16 +10097,18 @@ int ha_rocksdb::bulk_load_key(Rdb_transaction *const tx, const Rdb_key_def &kd,
   }
   DBUG_ASSERT(m_sst_info);
 
+  const rocksdb::Slice padded_value = pad_secondary_value(kd, value);
+
   if (sort) {
     Rdb_index_merge *key_merge;
     DBUG_ASSERT(cf != nullptr);
 
     res = tx->get_key_merge(kd.get_gl_index_id(), cf, &key_merge);
     if (res == HA_EXIT_SUCCESS) {
-      res = key_merge->add(key, value);
+      res = key_merge->add(key, padded_value);
     }
   } else {
-    res = m_sst_info->put(key, value);
+    res = m_sst_info->put(key, padded_value);
   }
 
   DBUG_RETURN(res);
@@ -10257,6 +10342,8 @@ int ha_rocksdb::update_write_sk(const TABLE *const table_arg,
   new_value_slice =
       rocksdb::Slice(reinterpret_cast<const char *>(m_sk_tails.ptr()),
                      m_sk_tails.get_current_pos());
+
+  new_value_slice = pad_secondary_value(kd, new_value_slice);
 
   if (bulk_load_sk && row_info.old_data == nullptr) {
     rc = bulk_load_key(row_info.tx, kd, new_key_slice, new_value_slice, true);

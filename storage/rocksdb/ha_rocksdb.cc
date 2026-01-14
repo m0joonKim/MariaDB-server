@@ -677,6 +677,15 @@ static uint32_t rocksdb_debug_manual_compaction_delay = 0;
 static uint32_t rocksdb_max_manual_compactions = 0;
 static my_bool rocksdb_rollback_on_timeout = FALSE;
 static my_bool rocksdb_enable_insert_with_update_caching = TRUE;
+#ifndef IOBPF_BASELINE_EXPERIMENT
+bool rocksdb_is_iobpf_enabled() { return rocksdb_enable_iobpf; }
+const char *rocksdb_get_iobpf_path() {
+  return rocksdb_iobpf_path ? rocksdb_iobpf_path : "";
+}
+const char *rocksdb_get_iobpf_secondary_path() {
+  return rocksdb_iobpf_secondary_path ? rocksdb_iobpf_secondary_path : "";
+}
+#endif
 
 std::atomic<uint64_t> rocksdb_row_lock_deadlocks(0);
 std::atomic<uint64_t> rocksdb_row_lock_wait_timeouts(0);
@@ -760,6 +769,7 @@ static std::unique_ptr<rocksdb::DBOptions> rdb_init_rocksdb_db_options(void) {
 
   o->two_write_queues = true;
   o->manual_wal_flush = true;
+  o->max_background_compactions = 8;
   return o;
 }
 
@@ -1368,6 +1378,14 @@ static MYSQL_SYSVAR_INT(max_background_jobs,
                         rocksdb_set_max_background_jobs,
                         rocksdb_db_options->max_background_jobs,
                         /* min */ -1, /* max */ MAX_BACKGROUND_JOBS, 0);
+
+static MYSQL_SYSVAR_INT(max_background_compactions,
+                        rocksdb_db_options->max_background_compactions,
+                        PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+                        "DBOptions::max_background_compactions for RocksDB",
+                        nullptr, nullptr,
+                        rocksdb_db_options->max_background_compactions,
+                        /* min */ -1, /* max */ INT_MAX, 0);
 
 static MYSQL_SYSVAR_UINT(max_subcompactions,
                          rocksdb_db_options->max_subcompactions,
@@ -2048,6 +2066,7 @@ static struct st_mysql_sys_var *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(persistent_cache_size_mb),
     MYSQL_SYSVAR(delete_obsolete_files_period_micros),
     MYSQL_SYSVAR(max_background_jobs),
+    MYSQL_SYSVAR(max_background_compactions),
     MYSQL_SYSVAR(max_log_file_size),
     MYSQL_SYSVAR(max_subcompactions),
     MYSQL_SYSVAR(log_file_time_to_roll),
@@ -5417,9 +5436,14 @@ static int rocksdb_init_func(void *const p) {
   rocksdb_db_options->wal_recovery_mode =
       static_cast<rocksdb::WALRecoveryMode>(rocksdb_wal_recovery_mode);
 
+  #ifndef IOBPF_BASELINE_EXPERIMENT
   if (rocksdb_enable_iobpf) {
+    int iobpf_thread_num = rocksdb_db_options->max_background_compactions;
+    if (iobpf_thread_num <= 0) {
+      iobpf_thread_num = static_cast<int>(rocksdb_db_options->max_background_jobs);
+    }
     ROCKSDB_NAMESPACE::preload_iobpf_bpf_prog(
-        static_cast<int>(rocksdb_db_options->max_background_jobs),
+        iobpf_thread_num,
         static_cast<int>(rocksdb_iobpf_hybrid_bound),
         static_cast<int>(rocksdb_iobpf_res_buf_size),
         static_cast<uint>(rocksdb_iobpf_readahead_size),
@@ -5427,6 +5451,7 @@ static int rocksdb_init_func(void *const p) {
         rocksdb_iobpf_path ? rocksdb_iobpf_path : "",
         rocksdb_iobpf_secondary_path ? rocksdb_iobpf_secondary_path : "");
   }
+  #endif
 
   if (rocksdb_db_options->allow_mmap_reads &&
       rocksdb_db_options->use_direct_reads) {
@@ -5574,7 +5599,7 @@ static int rocksdb_init_func(void *const p) {
   // and better memory allocation.
   // See:
   // https://github.com/facebook/rocksdb/commit/9ab5adfc59a621d12357580c94451d9f7320c2dd
-  rocksdb_tbl_options->format_version = 2;
+  rocksdb_tbl_options->format_version = 6;
 
   if (rocksdb_collect_sst_properties) {
     properties_collector_factory =
@@ -5633,8 +5658,12 @@ static int rocksdb_init_func(void *const p) {
   for (size_t i = 0; i < cf_names.size(); ++i) {
     rocksdb::ColumnFamilyOptions opts;
     cf_options_map->get_cf_options(cf_names[i], &opts);
+    #ifndef IOBPF_BASELINE_EXPERIMENT
     opts.enable_iobpf = rocksdb_enable_iobpf;
     opts.iobpf_path = rocksdb_iobpf_path ? rocksdb_iobpf_path : "";
+    opts.iobpf_secondary_path =
+        rocksdb_iobpf_secondary_path ? rocksdb_iobpf_secondary_path : "";
+    #endif
 
     // NO_LINT_DEBUG
     sql_print_information("  cf=%s", cf_names[i].c_str());
@@ -10050,26 +10079,6 @@ int ha_rocksdb::check_duplicate_sk(const TABLE *table_arg,
   return 0;
 }
 
-namespace {
-
-constexpr size_t kFixedSecondaryValueSize = 1024;
-
-// Pad secondary index values to the fixed size while preserving contents.
-rocksdb::Slice pad_secondary_value(const Rdb_key_def &kd,
-                                   const rocksdb::Slice &value) {
-  if (kd.m_index_type != Rdb_key_def::INDEX_TYPE_SECONDARY ||
-      value.size() >= kFixedSecondaryValueSize) {
-    return value;
-  }
-  // thread_local to ensure the backing store outlives the caller and avoids
-  // use-after-free when downstream code retains the Slice beyond the call.
-  thread_local std::string scratch;
-  scratch.assign(value.data(), value.size());
-  scratch.resize(kFixedSecondaryValueSize, '\0');
-  return rocksdb::Slice(scratch.data(), scratch.size());
-}
-
-}  // namespace
 
 int ha_rocksdb::bulk_load_key(Rdb_transaction *const tx, const Rdb_key_def &kd,
                               const rocksdb::Slice &key,
@@ -10097,18 +10106,16 @@ int ha_rocksdb::bulk_load_key(Rdb_transaction *const tx, const Rdb_key_def &kd,
   }
   DBUG_ASSERT(m_sst_info);
 
-  const rocksdb::Slice padded_value = pad_secondary_value(kd, value);
-
   if (sort) {
     Rdb_index_merge *key_merge;
     DBUG_ASSERT(cf != nullptr);
 
     res = tx->get_key_merge(kd.get_gl_index_id(), cf, &key_merge);
     if (res == HA_EXIT_SUCCESS) {
-      res = key_merge->add(key, padded_value);
+      res = key_merge->add(key, value);
     }
   } else {
-    res = m_sst_info->put(key, padded_value);
+    res = m_sst_info->put(key, value);
   }
 
   DBUG_RETURN(res);
@@ -10342,8 +10349,6 @@ int ha_rocksdb::update_write_sk(const TABLE *const table_arg,
   new_value_slice =
       rocksdb::Slice(reinterpret_cast<const char *>(m_sk_tails.ptr()),
                      m_sk_tails.get_current_pos());
-
-  new_value_slice = pad_secondary_value(kd, new_value_slice);
 
   if (bulk_load_sk && row_info.old_data == nullptr) {
     rc = bulk_load_key(row_info.tx, kd, new_key_slice, new_value_slice, true);

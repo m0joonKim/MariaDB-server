@@ -16,7 +16,6 @@
 
 /* For use of 'PRIu64': */
 #define __STDC_FORMAT_MACROS
-
 #include <my_global.h>
 
 #include <inttypes.h>
@@ -99,7 +98,11 @@ rocksdb::ColumnFamilyHandle *Rdb_cf_manager::get_or_create_cf(
     /* Create a Column Family. */
     rocksdb::ColumnFamilyOptions opts;
     m_cf_options->get_cf_options(cf_name, &opts);
-
+#ifndef IOBPF_BASELINE_EXPERIMENT
+    opts.enable_iobpf = rocksdb_is_iobpf_enabled();
+    opts.iobpf_path = rocksdb_get_iobpf_path();
+    opts.iobpf_secondary_path = rocksdb_get_iobpf_secondary_path();
+#endif
     // NO_LINT_DEBUG
     sql_print_information("RocksDB: creating a column family %s",
                           cf_name.c_str());

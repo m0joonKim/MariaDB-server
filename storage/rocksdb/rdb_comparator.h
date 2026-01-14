@@ -46,7 +46,7 @@ class Rdb_pk_comparator : public rocksdb::Comparator {
     return a.compare(b);
   }
 
-  const char *Name() const override { return "RocksDB_SE_v3.10"; }
+  const char *Name() const override { return "leveldb.BytewiseComparator"; }
 
   // TODO: advanced funcs:
   // - FindShortestSeparator
@@ -72,7 +72,7 @@ class Rdb_rev_comparator : public rocksdb::Comparator {
   int Compare(const rocksdb::Slice &a, const rocksdb::Slice &b) const override {
     return -a.compare(b);
   }
-  const char *Name() const override { return "rev:RocksDB_SE_v3.10"; }
+  const char *Name() const override { return "rev:leveldb.BytewiseComparator"; }
   void FindShortestSeparator(std::string *start,
                              const rocksdb::Slice &limit) const override {
     rocksdb::ReverseBytewiseComparator()->FindShortestSeparator(start, limit);

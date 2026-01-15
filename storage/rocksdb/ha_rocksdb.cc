@@ -1387,6 +1387,13 @@ static MYSQL_SYSVAR_INT(max_background_compactions,
                         rocksdb_db_options->max_background_compactions,
                         /* min */ -1, /* max */ INT_MAX, 0);
 
+static MYSQL_SYSVAR_INT(max_background_flushes,
+                        rocksdb_db_options->max_background_flushes,
+                        PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+                        "DBOptions::max_background_flushes for RocksDB", nullptr,
+                        nullptr, rocksdb_db_options->max_background_flushes,
+                        /* min */ -1, /* max */ INT_MAX, 0);
+
 static MYSQL_SYSVAR_UINT(max_subcompactions,
                          rocksdb_db_options->max_subcompactions,
                          PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
@@ -2067,6 +2074,7 @@ static struct st_mysql_sys_var *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(delete_obsolete_files_period_micros),
     MYSQL_SYSVAR(max_background_jobs),
     MYSQL_SYSVAR(max_background_compactions),
+    MYSQL_SYSVAR(max_background_flushes),
     MYSQL_SYSVAR(max_log_file_size),
     MYSQL_SYSVAR(max_subcompactions),
     MYSQL_SYSVAR(log_file_time_to_roll),

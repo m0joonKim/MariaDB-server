@@ -612,6 +612,7 @@ static my_bool rocksdb_debug_optimizer_no_zero_cardinality;
 static uint32_t rocksdb_wal_recovery_mode;
 static uint32_t rocksdb_stats_level;
 static my_bool rocksdb_enable_iobpf = false;
+static my_bool rocksdb_use_kernel_compaction_iobpf = false;
 static char *rocksdb_iobpf_path = const_cast<char *>("iobpf/comp.bpf.o");
 static char *rocksdb_iobpf_secondary_path =
     const_cast<char *>("iobpf/comp_secondary.bpf.o");
@@ -679,6 +680,9 @@ static my_bool rocksdb_rollback_on_timeout = FALSE;
 static my_bool rocksdb_enable_insert_with_update_caching = TRUE;
 #ifndef IOBPF_BASELINE_EXPERIMENT
 bool rocksdb_is_iobpf_enabled() { return rocksdb_enable_iobpf; }
+bool rocksdb_is_kernel_compaction_iobpf_enabled() {
+  return rocksdb_use_kernel_compaction_iobpf;
+}
 const char *rocksdb_get_iobpf_path() {
   return rocksdb_iobpf_path ? rocksdb_iobpf_path : "";
 }
@@ -1274,6 +1278,12 @@ static MYSQL_SYSVAR_SIZE_T(compaction_readahead_size,
 static MYSQL_SYSVAR_BOOL(
     enable_iobpf, rocksdb_enable_iobpf, PLUGIN_VAR_RQCMDARG,
     "Enable IO BPF support in RocksDB compaction", nullptr, nullptr, FALSE);
+
+static MYSQL_SYSVAR_BOOL(
+    use_kernel_compaction_iobpf, rocksdb_use_kernel_compaction_iobpf,
+    PLUGIN_VAR_RQCMDARG,
+    "Use kernel compaction IO BPF support in RocksDB compaction", nullptr,
+    nullptr, FALSE);
 
 static MYSQL_SYSVAR_STR(
     iobpf_path, rocksdb_iobpf_path, PLUGIN_VAR_RQCMDARG,
@@ -2097,6 +2107,7 @@ static struct st_mysql_sys_var *rocksdb_system_variables[] = {
     MYSQL_SYSVAR(wal_bytes_per_sync),
     MYSQL_SYSVAR(enable_thread_tracking),
     MYSQL_SYSVAR(enable_iobpf),
+    MYSQL_SYSVAR(use_kernel_compaction_iobpf),
     MYSQL_SYSVAR(iobpf_path),
     MYSQL_SYSVAR(iobpf_secondary_path),
     MYSQL_SYSVAR(iobpf_hybrid_bound),
@@ -3479,8 +3490,7 @@ private:
     tx_opts.use_only_the_last_commit_time_batch_for_recovery =
         THDVAR(m_thd, commit_time_batch_for_recovery);
     tx_opts.max_write_batch_size = THDVAR(m_thd, write_batch_max_bytes);
-
-    write_opts.sync = (rocksdb_flush_log_at_trx_commit == FLUSH_LOG_SYNC);
+    write_opts.sync = (rocksdb_flush_log_at_trx_commit == FLUSH_LOG_SYNC); // byhs: 이거 아마 기본이 true? 로 알고있음.(O) 찍어보긴해야됨. 만약 true면 이거 false로 바꿔서 exp3 그대로 한번 돌려보고,, comapction thread 4개로 고정, IO thread 1,2,4,8,12  
     write_opts.disableWAL = THDVAR(m_thd, write_disable_wal);
     write_opts.ignore_missing_column_families =
         THDVAR(m_thd, write_ignore_missing_column_families);
@@ -5456,6 +5466,7 @@ static int rocksdb_init_func(void *const p) {
         static_cast<int>(rocksdb_iobpf_res_buf_size),
         static_cast<uint>(rocksdb_iobpf_readahead_size),
         rocksdb_iobpf_use_early_cache_drop,
+        rocksdb_use_kernel_compaction_iobpf,
         rocksdb_iobpf_path ? rocksdb_iobpf_path : "",
         rocksdb_iobpf_secondary_path ? rocksdb_iobpf_secondary_path : "");
   }
@@ -5668,6 +5679,7 @@ static int rocksdb_init_func(void *const p) {
     cf_options_map->get_cf_options(cf_names[i], &opts);
     #ifndef IOBPF_BASELINE_EXPERIMENT
     opts.enable_iobpf = rocksdb_enable_iobpf;
+    opts.use_kernel_compaction_iobpf = rocksdb_use_kernel_compaction_iobpf;
     opts.iobpf_path = rocksdb_iobpf_path ? rocksdb_iobpf_path : "";
     opts.iobpf_secondary_path =
         rocksdb_iobpf_secondary_path ? rocksdb_iobpf_secondary_path : "";

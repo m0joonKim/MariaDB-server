@@ -1,3 +1,5 @@
+LOG/
+cnf/
 *-t
 *.ctest
 *.reject

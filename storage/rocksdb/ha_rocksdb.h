@@ -1065,6 +1065,7 @@ const int MYROCKS_MARIADB_PLUGIN_MATURITY_LEVEL= MariaDB_PLUGIN_MATURITY_STABLE;
 extern uint32_t rocksdb_ignore_datadic_errors;
 
 bool rocksdb_is_iobpf_enabled();
+bool rocksdb_is_kernel_compaction_iobpf_enabled();
 const char *rocksdb_get_iobpf_path();
 const char *rocksdb_get_iobpf_secondary_path();
 
@@ -1072,4 +1073,3 @@ void sql_print_verbose_info(const char *format, ...)
   ATTRIBUTE_FORMAT(printf, 1, 2);
 
 }  // namespace myrocks
-

@@ -100,6 +100,7 @@ rocksdb::ColumnFamilyHandle *Rdb_cf_manager::get_or_create_cf(
     m_cf_options->get_cf_options(cf_name, &opts);
 #ifndef IOBPF_BASELINE_EXPERIMENT
     opts.enable_iobpf = rocksdb_is_iobpf_enabled();
+    opts.use_kernel_compaction_iobpf = rocksdb_is_kernel_compaction_iobpf_enabled();
     opts.iobpf_path = rocksdb_get_iobpf_path();
     opts.iobpf_secondary_path = rocksdb_get_iobpf_secondary_path();
 #endif
